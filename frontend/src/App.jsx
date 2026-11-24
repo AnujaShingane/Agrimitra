@@ -62,8 +62,13 @@ function App() {
   return (
     <Routes>
       <Route path="/" element={<LandingPage />} />
+      <Route path="/about" element={<LandingPage page="about" />} />
+      <Route path="/features" element={<LandingPage page="features" />} />
+      <Route path="/how-it-works" element={<LandingPage page="how-it-works" />} />
+      <Route path="/contact" element={<LandingPage page="contact" />} />
       <Route path="/login" element={<AuthPage mode="login" />} />
       <Route path="/signup" element={<AuthPage mode="signup" />} />
+      <Route path="/dashboard" element={<Navigate to="/app" replace />} />
       <Route
         path="/app"
         element={(

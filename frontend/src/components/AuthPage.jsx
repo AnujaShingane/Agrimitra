@@ -4,8 +4,10 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 
 export default function AuthPage({ mode }) {
   const isSignup = mode === 'signup';
+  const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const location = useLocation();
@@ -14,6 +16,12 @@ export default function AuthPage({ mode }) {
   async function handleSubmit(event) {
     event.preventDefault();
     setError('');
+
+    if (isSignup && password !== confirmPassword) {
+      setError('Your passwords do not match.');
+      return;
+    }
+
     setSubmitting(true);
 
     try {
@@ -21,11 +29,25 @@ export default function AuthPage({ mode }) {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({
+          ...(isSignup ? { full_name: fullName.trim() } : {}),
+          email: email.trim(),
+          password,
+        }),
       });
-      const data = await response.json();
+
+      let data;
+      try {
+        data = await response.json();
+      } catch {
+        data = {};
+      }
+
       if (!response.ok) {
-        throw new Error(data.detail || 'We could not complete your request. Please try again.');
+        const detail = typeof data.detail === 'string'
+          ? data.detail
+          : 'We could not complete your request. Please try again.';
+        throw new Error(detail);
       }
 
       navigate(location.state?.from?.pathname || '/app', { replace: true });
@@ -53,6 +75,22 @@ export default function AuthPage({ mode }) {
         </p>
 
         <form className="auth-form" onSubmit={handleSubmit}>
+          {isSignup && (
+            <>
+              <label htmlFor="auth-full-name">Full name</label>
+              <input
+                id="auth-full-name"
+                type="text"
+                autoComplete="name"
+                minLength={2}
+                maxLength={100}
+                required
+                value={fullName}
+                onChange={(event) => setFullName(event.target.value)}
+                placeholder="Your name"
+              />
+            </>
+          )}
           <label htmlFor="auth-email">Email address</label>
           <input
             id="auth-email"
@@ -76,6 +114,22 @@ export default function AuthPage({ mode }) {
             onChange={(event) => setPassword(event.target.value)}
             placeholder={isSignup ? 'At least 8 characters' : 'Enter your password'}
           />
+          {isSignup && (
+            <>
+              <label htmlFor="auth-confirm-password">Confirm password</label>
+              <input
+                id="auth-confirm-password"
+                type="password"
+                autoComplete="new-password"
+                minLength={8}
+                maxLength={128}
+                required
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                placeholder="Enter your password again"
+              />
+            </>
+          )}
           {error && <p className="auth-error" role="alert">{error}</p>}
           <button className="button button-primary auth-submit" type="submit" disabled={submitting}>
             {submitting ? 'Please wait…' : isSignup ? 'Create account' : 'Log in'}
@@ -84,7 +138,7 @@ export default function AuthPage({ mode }) {
         </form>
 
         <p className="auth-switch">
-          {isSignup ? 'Already have an account?' : 'New to AgriMitra?'}{' '}
+          {isSignup ? 'Already have an account?' : "Don't have an account?"}{' '}
           <Link to={isSignup ? '/login' : '/signup'}>{isSignup ? 'Log in' : 'Create an account'}</Link>
         </p>
         <p className="auth-note"><Sprout size={15} /> Your account helps keep your AgriMitra experience yours.</p>

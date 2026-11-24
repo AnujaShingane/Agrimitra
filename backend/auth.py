@@ -22,8 +22,19 @@ EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class Credentials(BaseModel):
+    full_name: str | None = Field(default=None, min_length=2, max_length=100)
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=8, max_length=128)
+
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if len(normalized) < 2:
+            raise ValueError("Enter your full name.")
+        return normalized
 
     @field_validator("email")
     @classmethod
@@ -53,10 +64,18 @@ def _initialize_store() -> None:
             """CREATE TABLE IF NOT EXISTS auth_users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                full_name TEXT NOT NULL DEFAULT '',
                 password_hash TEXT NOT NULL,
                 created_at INTEGER NOT NULL
             )"""
         )
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(auth_users)")
+        }
+        if "full_name" not in columns:
+            connection.execute(
+                "ALTER TABLE auth_users ADD COLUMN full_name TEXT NOT NULL DEFAULT ''"
+            )
         connection.execute(
             """CREATE TABLE IF NOT EXISTS auth_settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -124,10 +143,14 @@ def _read_session(token: str | None) -> dict | None:
 
     with _connect() as connection:
         row = connection.execute(
-            "SELECT id, email FROM auth_users WHERE id = ?",
+            "SELECT id, email, full_name FROM auth_users WHERE id = ?",
             (user_id,),
         ).fetchone()
-    return {"id": row["id"], "email": row["email"]} if row else None
+    return (
+        {"id": row["id"], "email": row["email"], "full_name": row["full_name"]}
+        if row
+        else None
+    )
 
 
 def _set_session_cookie(response: Response, user_id: int) -> None:
@@ -143,7 +166,11 @@ def _set_session_cookie(response: Response, user_id: int) -> None:
 
 
 def _user_response(user: dict) -> dict:
-    return {"id": user["id"], "email": user["email"]}
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "full_name": user.get("full_name", ""),
+    }
 
 
 @router.post("/signup", status_code=201)
@@ -152,14 +179,24 @@ def signup(credentials: Credentials, response: Response) -> dict:
     try:
         with _connect() as connection:
             cursor = connection.execute(
-                "INSERT INTO auth_users (email, password_hash, created_at) VALUES (?, ?, ?)",
-                (credentials.email, _hash_password(credentials.password), int(time.time())),
+                """INSERT INTO auth_users (email, full_name, password_hash, created_at)
+                VALUES (?, ?, ?, ?)""",
+                (
+                    credentials.email,
+                    credentials.full_name or "",
+                    _hash_password(credentials.password),
+                    int(time.time()),
+                ),
             )
             user_id = cursor.lastrowid
     except sqlite3.IntegrityError as error:
         raise HTTPException(status_code=409, detail="An account with this email already exists.") from error
 
-    user = {"id": user_id, "email": credentials.email}
+    user = {
+        "id": user_id,
+        "email": credentials.email,
+        "full_name": credentials.full_name or "",
+    }
     _set_session_cookie(response, user_id)
     return {"user": _user_response(user)}
 
@@ -169,14 +206,18 @@ def login(credentials: Credentials, response: Response) -> dict:
     _initialize_store()
     with _connect() as connection:
         row = connection.execute(
-            "SELECT id, email, password_hash FROM auth_users WHERE email = ?",
+            "SELECT id, email, full_name, password_hash FROM auth_users WHERE email = ?",
             (credentials.email,),
         ).fetchone()
 
     if row is None or not _verify_password(credentials.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    user = {"id": row["id"], "email": row["email"]}
+    user = {
+        "id": row["id"],
+        "email": row["email"],
+        "full_name": row["full_name"],
+    }
     _set_session_cookie(response, user["id"])
     return {"user": _user_response(user)}
 
