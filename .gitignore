@@ -1,0 +1,15 @@
+# Secrets and local environments
+.env
+.env.*
+!.env.example
+backend/venv/
+frontend/node_modules/
+
+# Generated application files
+frontend/dist/
+backend/__pycache__/
+backend/checkpoints.db
+backend/runtime/
+backend/models/
+backend/data/docs/*.pdf
+.pytest_cache/
