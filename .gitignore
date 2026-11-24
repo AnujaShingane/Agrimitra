@@ -13,3 +13,20 @@ backend/runtime/
 backend/models/
 backend/data/docs/*.pdf
 .pytest_cache/
+
+# ZIP archives
+*.zip
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Node modules
+node_modules/
+
+# Environment files
+.env
