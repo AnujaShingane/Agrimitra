@@ -1232,7 +1232,7 @@ body {
   font-size: 0.84rem;
 }
 
-.landing-hero {
+.landing-hero1 {
   width: min(1240px, calc(100% - 64px));
   min-height: 490px;
   margin: 0 auto;
@@ -1785,7 +1785,7 @@ body {
 }
 
 @media (max-width: 900px) {
-  .landing-hero {
+  .landing-hero1 {
     min-height: auto;
     grid-template-columns: 1fr 0.9fr;
   }
@@ -1816,7 +1816,7 @@ body {
 
 @media (max-width: 640px) {
   .landing-nav,
-  .landing-hero,
+  .landing-hero1,
   .landing-services,
   .landing-footer {
     width: calc(100% - 36px);
@@ -1844,7 +1844,7 @@ body {
     font-size: 0.78rem;
   }
 
-  .landing-hero {
+  .landing-hero1 {
     grid-template-columns: 1fr;
     gap: 22px;
     padding: 42px 0 24px;
@@ -2008,7 +2008,7 @@ body,
   color: #31523a;
 }
 
-.landing-hero {
+.landing-hero1 {
   position: relative;
   z-index: 1;
   display: flex;
@@ -2107,7 +2107,7 @@ body,
     gap: 14px;
   }
 
-  .landing-hero {
+  .landing-hero1 {
     width: calc(100% - 36px);
     min-height: 0;
     align-items: flex-start;

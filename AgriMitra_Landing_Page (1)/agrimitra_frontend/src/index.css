@@ -1126,17 +1126,17 @@ body {
 /* AgriMitra landing page */
 .app-content:has(.landing-page) { padding: 0; }
 .landing-page { color: #23412e; max-width: 100%; background: #f7faf4; min-height: 100%; }
-.landing-hero {
+.landing-hero1 {
   min-height: 540px; position: relative; display: flex; align-items: center;
   background-size: cover; background-position: center 44%; padding: 66px clamp(28px, 6vw, 88px);
   color: #fff; overflow: hidden;
 }
-.landing-hero-content { max-width: 610px; position: relative; z-index: 1; }
+.landing-hero1-content { max-width: 610px; position: relative; z-index: 1; }
 .hero-eyebrow, .section-kicker { display: inline-flex; align-items: center; gap: 9px; letter-spacing: .14em; font-size: .72rem; font-weight: 800; }
 .hero-eyebrow { color: #d7e9c9; margin-bottom: 22px; }
 .eyebrow-dot { width: 8px; height: 8px; border-radius: 50%; background: #b4d58a; box-shadow: 0 0 0 5px rgba(180,213,138,.15); }
-.landing-hero h1 { font-size: clamp(3.2rem, 6.5vw, 5.5rem); line-height: .98; letter-spacing: -.055em; color: #fff; margin-bottom: 22px; }
-.landing-hero h1 span { color: #c4e39b; }
+.landing-hero1 h1 { font-size: clamp(3.2rem, 6.5vw, 5.5rem); line-height: .98; letter-spacing: -.055em; color: #fff; margin-bottom: 22px; }
+.landing-hero1 h1 span { color: #c4e39b; }
 .landing-lead { color: rgba(255,255,255,.88); font-size: 1.05rem; line-height: 1.8; max-width: 535px; }
 .landing-actions { display: flex; flex-wrap: wrap; gap: 13px; margin-top: 30px; }
 .landing-btn { min-height: 49px; padding: 0 21px; display: inline-flex; align-items: center; justify-content: center; gap: 12px; border-radius: 9px; text-decoration: none; font-weight: 750; font-size: .92rem; transition: transform .2s, background .2s, box-shadow .2s; }
@@ -1176,8 +1176,8 @@ body {
 @media (max-width: 1150px) { .landing-tools { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) {
   .app-content:has(.landing-page) { padding: 0; }
-  .landing-hero { min-height: 560px; padding: 50px 25px; background-position: 62% center; }
-  .landing-hero h1 { font-size: 3.5rem; }
+  .landing-hero1 { min-height: 560px; padding: 50px 25px; background-position: 62% center; }
+  .landing-hero1 h1 { font-size: 3.5rem; }
   .landing-lead { font-size: .94rem; max-width: 430px; }
   .hero-image-caption { display: none; }
   .landing-intro { padding: 48px 25px 20px; display: block; }

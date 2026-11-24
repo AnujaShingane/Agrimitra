@@ -1,102 +1,79 @@
-"""Documentation-only training scaffold for a plant disease classifier.
-
-This project does not include a dataset or trained weights, so the script is a
-reproducible template to run locally when the dataset becomes available.
-"""
-
+"""Train EfficientNet-B0 using a torchvision ImageFolder dataset."""
 from __future__ import annotations
-
-import json
-import os
+import argparse
 from pathlib import Path
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision import datasets, models, transforms
 
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-
-
-def build_model(num_classes: int) -> keras.Model:
-    base_model = MobileNetV2(
-        input_shape=(224, 224, 3),
-        include_top=False,
-        weights="imagenet",
-    )
-    base_model.trainable = False
-
-    x = base_model.output
-    x = layers.GlobalAveragePooling2D()(x)
-    x = layers.Dropout(0.2)(x)
-    x = layers.Dense(128, activation="relu")(x)
-    outputs = layers.Dense(num_classes, activation="softmax")(x)
-    return keras.Model(inputs=base_model.input, outputs=outputs)
-
-
-def main() -> None:
-    data_dir = Path(os.getenv("DATASET_DIR", "./data/plant_disease_dataset"))
-    model_dir = Path(os.getenv("MODEL_OUTPUT_DIR", "./models"))
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    if not data_dir.exists():
-        raise FileNotFoundError(
-            "Plant disease dataset is not available. Download a public dataset such as PlantVillage and set DATASET_DIR."
-        )
-
-    train_dir = data_dir / "train"
-    val_dir = data_dir / "val"
-    if not train_dir.exists() or not val_dir.exists():
-        raise FileNotFoundError(
-            "Expected train/ and val/ directories under the dataset root."
-        )
-
-    class_names = sorted([p.name for p in train_dir.iterdir() if p.is_dir()])
-    if not class_names:
-        raise ValueError("No classes found in the training dataset.")
-
-    with (model_dir / "class_labels.json").open("w", encoding="utf-8") as fh:
-        json.dump(class_names, fh, indent=2)
-
-    train_gen = ImageDataGenerator(
-        rescale=1.0 / 255.0,
-        rotation_range=20,
-        width_shift_range=0.1,
-        height_shift_range=0.1,
-        brightness_range=(0.8, 1.2),
-        horizontal_flip=True,
-    )
-    val_gen = ImageDataGenerator(rescale=1.0 / 255.0)
-
-    train_flow = train_gen.flow_from_directory(
-        train_dir,
-        target_size=(224, 224),
-        batch_size=32,
-        class_mode="categorical",
-    )
-    val_flow = val_gen.flow_from_directory(
-        val_dir,
-        target_size=(224, 224),
-        batch_size=32,
-        class_mode="categorical",
-    )
-
-    model = build_model(len(class_names))
-    model.compile(
-        optimizer="adam",
-        loss="categorical_crossentropy",
-        metrics=["accuracy"],
-    )
-
-    model.fit(
-        train_flow,
-        validation_data=val_flow,
-        epochs=10,
-        callbacks=[keras.callbacks.ModelCheckpoint(model_dir / "plant_disease_model.keras", save_best_only=True)],
-    )
-
-    print(f"Model saved to {model_dir / 'plant_disease_model.keras'}")
-    print(f"Labels saved to {model_dir / 'class_labels.json'}")
-
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--data-dir", required=True, type=Path)
+    p.add_argument("--output", type=Path, default=Path(
+        "backend/models/leaf_disease/efficientnet_b0_leaf_disease.pth"))
+    p.add_argument("--epochs", type=int, default=12)
+    p.add_argument("--batch-size", type=int, default=24)
+    p.add_argument("--learning-rate", type=float, default=1e-4)
+    a = p.parse_args()
+    train_dir, val_dir = a.data_dir / "train", a.data_dir / "val"
+    if not train_dir.is_dir() or not val_dir.is_dir():
+        raise SystemExit("Expected dataset/train and dataset/val directories.")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    train_tfms = transforms.Compose([
+        transforms.Resize((224, 224)), transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(12),
+        transforms.ColorJitter(brightness=.15, contrast=.15, saturation=.10),
+        transforms.ToTensor(),
+        transforms.Normalize((.485,.456,.406), (.229,.224,.225))])
+    val_tfms = transforms.Compose([
+        transforms.Resize((224,224)), transforms.ToTensor(),
+        transforms.Normalize((.485,.456,.406), (.229,.224,.225))])
+    train_ds = datasets.ImageFolder(train_dir, transform=train_tfms)
+    val_ds = datasets.ImageFolder(val_dir, transform=val_tfms)
+    if train_ds.classes != val_ds.classes:
+        raise SystemExit("Train and val must have identical class folders.")
+    if len(train_ds.classes) < 2:
+        raise SystemExit("At least two classes are required.")
+    train_loader = DataLoader(train_ds, batch_size=a.batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=a.batch_size, shuffle=False, num_workers=0)
+    # ImageNet weights download on first run if not already cached.
+    model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.DEFAULT)
+    model.classifier[1] = nn.Linear(model.classifier[1].in_features, len(train_ds.classes))
+    model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=a.learning_rate)
+    criterion = nn.CrossEntropyLoss()
+    best = 0.0
+    a.output.parent.mkdir(parents=True, exist_ok=True)
+    for epoch in range(a.epochs):
+        model.train()
+        running = 0.0
+        for x, y in train_loader:
+            x, y = x.to(device), y.to(device)
+            optimizer.zero_grad(set_to_none=True)
+            loss = criterion(model(x), y)
+            loss.backward()
+            optimizer.step()
+            running += loss.item() * x.size(0)
+        model.eval()
+        correct = total = 0
+        with torch.inference_mode():
+            for x, y in val_loader:
+                x, y = x.to(device), y.to(device)
+                correct += (model(x).argmax(1) == y).sum().item()
+                total += y.size(0)
+        acc = correct / max(total, 1)
+        print(f"Epoch {epoch+1}/{a.epochs} loss={running/max(len(train_ds),1):.4f} val_acc={acc:.4f}")
+        if acc > best:
+            best = acc
+            torch.save({"architecture":"efficientnet_b0",
+                        "model_state_dict":model.state_dict(),
+                        "class_names":train_ds.classes,
+                        "image_size":224,
+                        "best_validation_accuracy":best}, a.output)
+    print(f"Best validation accuracy: {best:.4f}")
+    print(f"Saved checkpoint: {a.output}")
+    print("Evaluate on a separate real-farm test set before deployment.")
 
 if __name__ == "__main__":
     main()

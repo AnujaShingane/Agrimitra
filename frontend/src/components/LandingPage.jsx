@@ -129,7 +129,17 @@ function Hero({ onGetStarted, checkingSession, sessionError }) {
     <main className="public-hero" id="home" aria-labelledby="public-hero-title">
       <div className="public-hero-shade" aria-hidden="true" />
       <div className="public-hero-content">
-        <h1 id="public-hero-title">Growing Smarter,<br /><span>Farming Better.</span></h1>
+        <h1 id="public-hero-title">
+          <span className="public-hero-line">
+            <span className="public-hero-word" style={{ '--word-delay': '0ms' }}>Growing</span>{' '}
+            <span className="public-hero-word" style={{ '--word-delay': '180ms' }}>Smarter,</span>
+          </span>
+          <br />
+          <span className="public-hero-line public-hero-line-accent">
+            <span className="public-hero-word" style={{ '--word-delay': '360ms' }}>Farming</span>{' '}
+            <span className="public-hero-word" style={{ '--word-delay': '540ms' }}>Better.</span>
+          </span>
+        </h1>
         <div className="public-hero-actions">
           <button
             className="public-button public-button-hero"

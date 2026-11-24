@@ -14,8 +14,8 @@ const tools = [
 export default function Home() {
   return (
     <div className="landing-page">
-      <section className="landing-hero" style={{ backgroundImage: `linear-gradient(90deg, rgba(12,39,24,.90) 0%, rgba(12,39,24,.78) 39%, rgba(12,39,24,.12) 76%), url(${farmerHero})` }}>
-        <div className="landing-hero-content">
+      <section className="landing-hero11" style={{ backgroundImage: `linear-gradient(90deg, rgba(12,39,24,.90) 0%, rgba(12,39,24,.78) 39%, rgba(12,39,24,.12) 76%), url(${farmerHero})` }}>
+        <div className="landing-hero11-content">
           <div className="hero-eyebrow"><span className="eyebrow-dot" /> SMARTER FARMING STARTS HERE</div>
           <h1>Grow better.<br /><span>Farm smarter.</span></h1>
           <p className="landing-lead">Your farming companion, powered by AI. Get crop guidance, understand plant health, follow market prices and make confident decisions — all in one place.</p>

@@ -26,3 +26,7 @@ pillow
 pytest
 pytest-asyncio
 duckduckgo-search
+ntorch
+ntorchvision
+nPillow
+//\ntorch>=2.2\ntorchvision>=0.17\nPillow>=10.0\n
