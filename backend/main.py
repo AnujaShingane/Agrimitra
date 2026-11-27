@@ -16,26 +16,33 @@ Serves the React frontend static files in production.
 import logging
 from pathlib import Path
 import os
+import base64
+import io
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 import json
-from typing import Optional
+from typing import Literal, Optional
 
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Form, HTTPException, Query, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+import httpx
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types
+from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel, Field, ValidationError
 import structlog
 import uuid
 import time
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.concurrency import run_in_threadpool
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from auth import router as auth_router
-from plant_disease_service import ModelUnavailableError, classify_leaf_image, validate_image_bytes
 from schemes_data import get_schemes
 
 # Load environment variables
@@ -671,354 +678,302 @@ Required JSON structure:
 
 
 # ---------------------------------------------------------------------------
-# Leaf Scan (Groq Vision)
+# Leaf Scan (Gemini Vision)
 # ---------------------------------------------------------------------------
+class LeafScanAnalysis(BaseModel):
+    plant_name: str
+    plant_identification_note: str
+    possible_disease: str
+    diagnosis_status: Literal["possible", "uncertain", "plant_mismatch", "healthy"]
+    observed_symptoms: list[str]
+    explanation: str
+    alternative_causes: list[str]
+    severity: Literal["mild", "moderate", "severe", "unclear"]
+    treatment: list[str]
+    prevention: list[str]
+    confidence_note: str
+    when_to_consult_an_expert: str
+
+
+LEAF_SCAN_MAX_BYTES = 10 * 1024 * 1024
+LEAF_SCAN_SYMPTOMS = {
+    "Black or brown spots",
+    "Yellow leaves",
+    "Holes or damaged leaves",
+    "White powder or patches",
+    "Leaves drying or falling",
+    "Curling or twisted leaves",
+    "Something else",
+    "I don't know",
+}
+LEAF_SCAN_TIMELINES = {
+    "Today",
+    "A few days ago",
+    "About a week ago",
+    "More than two weeks ago",
+    "Not sure",
+}
+LEAF_SCAN_SPREAD = {"Yes", "No", "Not sure"}
+LEAF_SCAN_INSTRUCTIONS = """Act as a plant-health analysis assistant helping farmers.
+Analyse the uploaded leaf image using the plant name and all additional information
+supplied by the farmer. Answer in the requested language.
+
+Consider the entered plant name, but do not blindly assume it is correct. Identify
+visible symptoms from the image. Suggest possible diseases or other causes, including
+pests or nutrient problems when appropriate. Explain likely causes in simple language
+and give practical treatment and prevention suggestions. Clearly say when the image is
+unclear or evidence is insufficient. Never invent a diagnosis or claim certainty
+without evidence. Flag any mismatch between the image and plant name. If several
+causes are possible, explain them as alternatives. Do not give unsafe pesticide
+instructions; recommend local agricultural guidance and following product labels.
+
+Match the certainty of every explanation to diagnosis_status. When the status is
+"possible" or "uncertain", use cautious wording such as "may be consistent with".
+Do not call symptoms "highly characteristic", a "key indicator", or say the
+condition "strongly suggests" or confirms a disease. Separate visible observations
+from possible causes, state what the image cannot establish, and name a specific
+pathogen only when the image evidence supports that level of detail. In
+confidence_note, clearly state when a photo alone cannot confirm the cause and
+mention that other causes may look similar.
+
+Return only the requested structured JSON. Use qualitative uncertainty, not a
+numerical confidence score. Include every requested field and use concise,
+farmer-friendly wording."""
+
+
+def _validate_leaf_scan_image(contents: bytes) -> str:
+    if not contents:
+        raise ValueError("The uploaded image is empty.")
+    if len(contents) > LEAF_SCAN_MAX_BYTES:
+        raise ValueError("Image must be 10MB or smaller.")
+
+    try:
+        with Image.open(io.BytesIO(contents)) as image:
+            image.verify()
+        with Image.open(io.BytesIO(contents)) as image:
+            if image.width < 80 or image.height < 80:
+                raise ValueError("Image is too small. Upload a clearer leaf photo.")
+            image_format = (image.format or "").upper()
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError("Uploaded file is not a valid image.") from exc
+
+    mime_type = {
+        "JPEG": "image/jpeg",
+        "PNG": "image/png",
+        "WEBP": "image/webp",
+    }.get(image_format)
+    if mime_type is None:
+        raise ValueError("Only JPEG, PNG, and WebP images are supported.")
+    return mime_type
+
+
+def _parse_leaf_scan_response(output_text: str) -> dict:
+    try:
+        json_text = output_text.strip()
+        if json_text.startswith("```"):
+            json_text = json_text.removeprefix("```json").removeprefix("```")
+            json_text = json_text.removesuffix("```").strip()
+
+        analysis_data = json.loads(json_text)
+        if not isinstance(analysis_data, dict):
+            raise ValueError("Leaf analysis must be a JSON object.")
+
+        expected_fields = LeafScanAnalysis.model_fields
+        missing_fields = expected_fields.keys() - analysis_data.keys()
+        if missing_fields:
+            raise ValueError(
+                f"Leaf analysis is missing required fields: {', '.join(sorted(missing_fields))}."
+            )
+
+        normalized_data = {
+            field: analysis_data[field] for field in expected_fields
+        }
+        return LeafScanAnalysis.model_validate(normalized_data).model_dump()
+    except (ValidationError, ValueError) as exc:
+        validation_errors = (
+            [
+                {"field": ".".join(map(str, error["loc"])), "type": error["type"]}
+                for error in exc.errors(include_input=False)
+            ]
+            if isinstance(exc, ValidationError)
+            else str(exc)
+        )
+        logger.error(
+            "Gemini returned an invalid leaf analysis.",
+            validation_errors=validation_errors,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="The vision service returned an invalid leaf analysis. Please try again.",
+        ) from exc
+
+
+def _request_gemini_leaf_analysis(
+    api_key: str,
+    contents: bytes,
+    mime_type: str,
+    plant: str,
+    observations: list[str],
+    additional_symptoms: str,
+    noticed_when: str,
+    spreading: str,
+    description: str,
+    language: str,
+) -> dict:
+    context = "\n".join(
+        [
+            f"Plant name provided by farmer: {plant}",
+            f"Observed symptoms selected: {', '.join(observations) or 'Not provided'}",
+            f"Other symptoms described: {additional_symptoms or 'Not provided'}",
+            f"When first noticed: {noticed_when or 'Not provided'}",
+            f"Is the problem spreading: {spreading or 'Not provided'}",
+            f"Additional notes: {description or 'Not provided'}",
+            f"Respond in: {language}",
+        ]
+    )
+    image_data = base64.b64encode(contents).decode("ascii")
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            api_version="v1beta",
+            timeout=45_000,
+            retry_options=types.HttpRetryOptions(
+                attempts=3,
+                initial_delay=1,
+                max_delay=3,
+                http_status_codes=[408, 429, 500, 502, 503, 504],
+            ),
+        ),
+    )
+    response = client.models.generate_content(
+        model=os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash"),
+        contents=[
+            types.Part.from_bytes(data=contents, mime_type=mime_type),
+            context,
+        ],
+        config=types.GenerateContentConfig(
+            system_instruction=LEAF_SCAN_INSTRUCTIONS,
+            response_mime_type="application/json",
+            response_schema=LeafScanAnalysis,
+            max_output_tokens=1200,
+        ),
+    )
+    output_text = response.text
+    if not isinstance(output_text, str) or not output_text.strip():
+        raise HTTPException(
+            status_code=502,
+            detail="The vision service returned no leaf analysis. Please try again.",
+        )
+    return _parse_leaf_scan_response(output_text)
+
+
 @app.post("/api/scan")
 @limiter.limit("5/minute")
 async def scan_endpoint(
     request: Request,
     file: UploadFile = File(...),
-    plant: str = Form(..., min_length=2, max_length=80),
+    plant: str = Form(..., min_length=2, max_length=100),
+    observations: list[str] = Form(default_factory=list),
+    additional_symptoms: str = Form(default="", max_length=300),
+    noticed_when: str = Form(default="", max_length=40),
+    spreading: str = Form(default="", max_length=20),
     description: str = Form(default="", max_length=1200),
     lang: str = Query(default="en"),
 ):
-    """Analyze a plant leaf using the image, selected plant, and farmer notes."""
+    """Analyze an uploaded leaf and farmer-provided context with Gemini Vision."""
     _require_supported_language(lang)
-    allowed_types = ["image/jpeg", "image/png", "image/webp"]
-
-    if file.content_type and file.content_type not in allowed_types:
+    if len(plant.strip()) < 2:
+        raise HTTPException(status_code=422, detail="Enter the plant name.")
+    if len(observations) > len(LEAF_SCAN_SYMPTOMS) or any(
+        symptom not in LEAF_SCAN_SYMPTOMS for symptom in observations
+    ):
+        raise HTTPException(status_code=422, detail="Choose only the listed symptom options.")
+    if "I don't know" in observations and len(observations) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail="'I don't know' cannot be selected with other symptoms.",
+        )
+    if noticed_when and noticed_when not in LEAF_SCAN_TIMELINES:
+        raise HTTPException(status_code=422, detail="Choose a listed time option.")
+    if spreading and spreading not in LEAF_SCAN_SPREAD:
+        raise HTTPException(status_code=422, detail="Choose a listed spreading option.")
+    if file.content_type and file.content_type not in {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }:
         raise HTTPException(
             status_code=400,
             detail="Invalid file type. Only JPEG, PNG, and WebP are allowed.",
         )
 
     try:
-        contents = await file.read()
-        mime_type = validate_image_bytes(contents, file.filename or "leaf.jpg")
+        contents = await file.read(LEAF_SCAN_MAX_BYTES + 1)
+        mime_type = _validate_leaf_scan_image(contents)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if not os.getenv("GROQ_API_KEY") or os.getenv("GROQ_API_KEY") == "your_key_here":
-        try:
-            analysis = classify_leaf_image(contents, file.filename or "leaf.jpg")
-            return {"analysis": {**analysis, "status": "model_unavailable", "message": "No trained leaf-disease model is configured in this deployment; upload a trained model to enable predictions."}}
-        except ModelUnavailableError:
-            raise HTTPException(
-                status_code=503,
-                detail="Leaf disease model is not configured. Train and deploy a plant-disease model before using scanner inference.",
-            )
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key or api_key == "your_gemini_api_key_here":
+        raise HTTPException(
+            status_code=503,
+            detail="Leaf analysis is unavailable because GEMINI_API_KEY is not configured.",
+        )
 
-    api_key = os.getenv("GROQ_API_KEY")
     try:
-        import base64
-        from groq import Groq
-
-        encoded = base64.b64encode(contents).decode("utf-8")
-
-        vision_model = os.getenv(
-            "GROQ_VISION_MODEL",
-            "qwen/qwen3.6-27b",
+        analysis = await run_in_threadpool(
+            _request_gemini_leaf_analysis,
+            api_key,
+            contents,
+            mime_type,
+            plant.strip(),
+            observations,
+            additional_symptoms.strip(),
+            noticed_when,
+            spreading,
+            description.strip(),
+            LANG_MAP[lang],
         )
-        client = Groq(api_key=api_key)
-
-        try:
-            available_models = {model.id for model in client.models.list().data}
-        except Exception as exc:
-            logger.warning(f"Could not list Groq models before leaf analysis: {exc}")
-            available_models = {vision_model}
-
-        if vision_model not in available_models:
-            compatible_models = [
-                "qwen/qwen3.8-27b",
-                "qwen/qwen3.6-27b",
-                "meta-llama/llama-4-scout-17b-16e-instruct",
-                "meta-llama/llama-4-maverick-17b-128e-instruct",
-            ]
-            vision_model = next((model for model in compatible_models if model in available_models), None)
-
-        if not vision_model:
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "No supported Groq vision model is enabled for this API key. "
-                    "Enable a vision model in Groq or set GROQ_VISION_MODEL to one available to this account."
-                ),
-            )
-
-        analysis_tool = {
-            "type": "function",
-            "function": {
-                "name": "report_leaf_analysis",
-                "description": (
-                    "Return the final structured analysis of the uploaded leaf. "
-                    "Choose one primary diagnosis only."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "disease": {
-                            "type": "string",
-                            "description": (
-                                "Single best-supported disease, pest infestation, "
-                                "nutrient deficiency, Healthy, or Uncertain."
-                            ),
-                        },
-                        "pathogen": {
-                            "type": "string",
-                            "description": "Likely pathogen and scientific name when supportable; otherwise Unknown.",
-                        },
-                        "visible_signs": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Two to five image-grounded visible signs.",
-                        },
-                        "diagnostic_note": {
-                            "type": "string",
-                            "description": "Brief explanation connecting the visible signs to the diagnosis.",
-                        },
-                        "confidence": {
-                            "type": "integer",
-                            "minimum": 0,
-                            "maximum": 100,
-                            "description": "Confidence percentage.",
-                        },
-                        "severity": {
-                            "type": "string",
-                            "enum": ["High", "Medium", "Low", "None", "Unknown"],
-                        },
-                        "affected_area": {
-                            "type": "string",
-                            "description": "Estimated affected leaf area or Unknown.",
-                        },
-                        "recommendations": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Three to five numbered practical actions, ordered by priority.",
-                        },
-                        "treatment_options": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Zero to three possible registered treatment options or an explicit statement that treatment cannot be selected from the image alone. Do not invent products, registrations, or doses.",
-                        },
-                        "treatment_advisory": {
-                            "type": "string",
-                            "description": "Mandatory safety guidance: use only a product currently registered and labeled for this crop and disease, and follow its current label for dose, water volume, waiting period, PPE, and local restrictions.",
-                        },
-                        "non_chemical_actions": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Two to five non-chemical actions such as scouting, monitoring flag leaves, sanitation where appropriate, and recording progression.",
-                        },
-                        "preventive_measures": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Three to five practical prevention measures.",
-                        },
-                        "confidence_note": {
-                            "type": "string",
-                            "description": "Caveat explaining why image identification is not definitive and when field confirmation is needed.",
-                        },
-                        "source_guidance": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "One or two general references to local agriculture, ICAR, KVK, or extension guidance; do not fabricate citations.",
-                        },
-                    },
-                    "required": [
-                        "disease",
-                        "pathogen",
-                        "visible_signs",
-                        "diagnostic_note",
-                        "confidence",
-                        "severity",
-                        "affected_area",
-                        "recommendations",
-                        "treatment_options",
-                        "treatment_advisory",
-                        "non_chemical_actions",
-                        "preventive_measures",
-                        "confidence_note",
-                        "source_guidance",
-                    ],
-                    "additionalProperties": False,
-                },
-            },
-        }
-
-        prompt = f"""Analyze the uploaded crop leaf image.
-
-    Farmer-provided context:
-    - Plant or crop: {plant.strip()}
-    - Observed description: {description.strip() or "Not provided"}
-
-Choose the single most likely primary issue:
-- disease
-- pest infestation
-- nutrient deficiency
-- Healthy
-- or Uncertain if the image is not sufficient.
-
-Rules:
-- Do not provide a differential diagnosis.
-- Treat the selected plant as the crop context, but do not claim a disease unless the image and notes support it.
-- If the image is unclear or the selected plant does not match the image, use Uncertain and explain that in a recommendation.
-- Keep confidence realistic and include a clear caveat that image identification is not definitive.
-- Provide two to five image-grounded visible signs and a short diagnostic explanation.
-- Provide three to five numbered actions, including field inspection and treatment guidance only at the level supported by the image.
-- If mentioning a fungicide or pesticide, say it must be locally registered and used exactly according to the current label and local agricultural advisory. Never provide an unsupported dose or claim that a product is universally appropriate.
-- Provide three to five prevention measures and one or two non-fabricated source-guidance notes such as consulting ICAR, KVK, or the State Agriculture Department.
-- Include a separate treatment advisory. You may name a fungicide only when the crop, disease, and regional registration are supported by reliable knowledge; otherwise say that no product can be selected from the image alone. Never invent a registration, label, dose, water volume, waiting period, or safety interval.
-- Include two to five non-chemical actions such as scouting surrounding plants, monitoring upper leaves/flag leaf, managing severely affected material where appropriate, and recording disease progression.
-- The treatment advisory must state that farmers should use only a product currently registered/labeled for the crop and disease, follow the current label for dose, water volume, waiting period, PPE, and safety precautions, and confirm with a local agricultural/KVK advisory.
-- Do not provide unsupported exact chemical dosages.
-- Your final answer MUST be the report_leaf_analysis tool call.
-"""
-
-        logger.info(
-            f"Sending leaf scan request ({file.filename}) "
-            f"to Groq Vision model {vision_model}..."
-        )
-
-        start_time = time.time()
-
-        completion = client.chat.completions.create(
-            model=vision_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a cautious agricultural image-analysis assistant. "
-                        "Use the report_leaf_analysis tool for the final answer."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{encoded}"
-                            },
-                        },
-                    ],
-                },
-            ],
-            tools=[analysis_tool],
-            tool_choice={
-                "type": "function",
-                "function": {"name": "report_leaf_analysis"},
-            },
-            temperature=0.2,
-            max_completion_tokens=int(os.getenv("GROQ_VISION_MAX_COMPLETION_TOKENS", "1800")),
-        )
-
-        latency_ms = int((time.time() - start_time) * 1000)
-        logger.info(
-            "LLM call completed",
-            llm_node="leaf_scan",
-            latency_ms=latency_ms,
-        )
-
-        message = completion.choices[0].message
-        tool_calls = getattr(message, "tool_calls", None)
-
-        if not tool_calls:
-            logger.error(
-                f"Vision model did not return a tool call. Content: {message.content}"
-            )
-            raise HTTPException(
-                status_code=500,
-                detail="Vision model did not return structured analysis.",
-            )
-
-        tool_call = tool_calls[0]
-
-        if tool_call.function.name != "report_leaf_analysis":
-            raise HTTPException(
-                status_code=500,
-                detail="Vision model returned an unexpected tool.",
-            )
-
-        try:
-            analysis_data = json.loads(tool_call.function.arguments)
-        except json.JSONDecodeError as e:
-            logger.error(
-                f"Invalid structured analysis JSON: {e}. "
-                f"Arguments: {tool_call.function.arguments}"
-            )
-            raise HTTPException(
-                status_code=500,
-                detail="Vision model returned invalid structured analysis.",
-            )
-
-        analysis_data.setdefault("disease", "Uncertain")
-        analysis_data.setdefault("pathogen", "Unknown")
-        analysis_data.setdefault("visible_signs", analysis_data.get("symptoms", []))
-        analysis_data.setdefault("diagnostic_note", "Image-based identification is not definitive; field confirmation is recommended.")
-        analysis_data.setdefault("confidence", 0)
-        analysis_data.setdefault("severity", "Unknown")
-        analysis_data.setdefault("affected_area", "Unknown")
-        analysis_data.setdefault("recommendations", [])
-        analysis_data.setdefault("treatment_options", [])
-        analysis_data.setdefault(
-            "treatment_advisory",
-            "Use only a product currently registered and labeled for this crop and disease. Follow the current label and confirm treatment timing with a local agricultural or KVK advisory.",
-        )
-        analysis_data.setdefault("non_chemical_actions", [])
-        analysis_data.setdefault("preventive_measures", [])
-        analysis_data.setdefault("confidence_note", "Image-based identification is not definitive; inspect additional plants and consult local agricultural guidance.")
-        analysis_data.setdefault("source_guidance", [])
-
-        if not isinstance(analysis_data["recommendations"], list):
-            analysis_data["recommendations"] = [str(analysis_data["recommendations"])]
-
-        if not isinstance(analysis_data["preventive_measures"], list):
-            analysis_data["preventive_measures"] = [str(analysis_data["preventive_measures"])]
-
-        for field in ("visible_signs", "treatment_options", "non_chemical_actions", "source_guidance"):
-            if not isinstance(analysis_data[field], list):
-                analysis_data[field] = [str(analysis_data[field])]
-
-        translated_analysis = get_translated(
-            f"scan_{file.filename}",
-            analysis_data,
-            lang,
-            "leaf disease analysis and remedies",
-        )
-
-        return {"analysis": translated_analysis}
+        return {"analysis": analysis}
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(
-            f"Leaf scan analysis error: {e}",
-            exc_info=True,
-        )
-        if "tool_use_failed" in str(e) or "Failed to call a function" in str(e):
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "The vision model returned an incomplete structured report. "
-                    "Please retry the scan; the server has increased the report output limit."
-                ),
-            ) from e
+    except httpx.TimeoutException as exc:
+        logger.warning("Gemini leaf scan request timed out.")
         raise HTTPException(
-            status_code=500,
-            detail=f"Leaf scan analysis failed: {str(e)}",
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(
-            f"Leaf scan analysis error: {e}",
-            exc_info=True,
-        )
+            status_code=504,
+            detail="Leaf analysis timed out. Please try again.",
+        ) from exc
+    except httpx.TransportError as exc:
+        logger.warning("Could not connect to Gemini for leaf analysis.")
         raise HTTPException(
-            status_code=500,
-            detail=f"Leaf scan analysis failed: {str(e)}",
+            status_code=503,
+            detail="Leaf analysis is temporarily unavailable. Please try again.",
+        ) from exc
+    except genai_errors.APIError as exc:
+        status_code = exc.code if isinstance(exc.code, int) else 502
+        provider_error = exc.message[:500] if isinstance(exc.message, str) else None
+        logger.error(
+            "Gemini leaf scan request failed.",
+            status_code=status_code,
+            provider_status=exc.status,
+            provider_error=provider_error,
         )
+        if status_code == 503 or exc.status == "UNAVAILABLE":
+            detail = "Gemini is temporarily busy. Please try again in a minute."
+        elif status_code == 429:
+            detail = "Gemini usage limit reached. Check your API quota and billing."
+        else:
+            detail = "Leaf analysis could not be completed. Please try again later."
+        raise HTTPException(
+            status_code=503 if status_code == 429 or status_code >= 500 else 502,
+            detail=detail,
+        ) from exc
+    except (ValueError, TypeError) as exc:
+        logger.error("Gemini returned an invalid leaf scan response.")
+        raise HTTPException(
+            status_code=502,
+            detail="The vision service returned an invalid leaf analysis. Please try again.",
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1030,7 +985,10 @@ async def health_check():
     groq_ready = bool(os.getenv("GROQ_API_KEY") and os.getenv("GROQ_API_KEY") != "your_key_here")
     weather_ready = bool(os.getenv("OPENWEATHER_API_KEY"))
     market_ready = bool(os.getenv("DATAGOV_API_KEY") and os.getenv("DATAGOV_API_KEY") != "your_key_here")
-    model_ready = bool(os.getenv("PLANT_DISEASE_MODEL_PATH") or Path(__file__).resolve().parent.joinpath("models", "plant_disease_model.keras").exists())
+    model_ready = bool(
+        os.getenv("GEMINI_API_KEY", "").strip()
+        and os.getenv("GEMINI_API_KEY") != "your_gemini_api_key_here"
+    )
 
     return {
         "status": "ok",

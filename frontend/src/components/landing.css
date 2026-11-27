@@ -173,7 +173,7 @@
   justify-content: flex-end;
   margin: 0 auto;
   padding: clamp(110px, 17vh, 175px) 0 20px;
-  transform: translate(-36px, -48px);
+  transform: translateY(-48px);
 }
 
 .public-hero h1 {
@@ -181,7 +181,8 @@
   color: #fff;
   font-family: 'Outfit', 'Inter', sans-serif;
   font-size: clamp(2.45rem, 4.2vw, 3.5rem);
-  font-weight: 700;
+  font-style: italic;
+  font-weight: 650;
   letter-spacing: -0.045em;
   line-height: 1.02;
 }
@@ -197,19 +198,42 @@
 
 .public-hero-word {
   display: inline-block;
-  opacity: 1;
-  animation: public-word-reveal 650ms var(--word-delay) cubic-bezier(0.2, 0.75, 0.25, 1) both;
+  white-space: pre;
 }
 
-@keyframes public-word-reveal {
+.public-hero-letter {
+  display: inline-block;
+  opacity: 0;
+  color: #fff;
+  animation:
+    public-letter-reveal 420ms var(--letter-delay) cubic-bezier(0.2, 0.75, 0.25, 1) forwards,
+    public-letter-glitter 2.4s var(--glitter-delay) ease-in-out infinite;
+}
+
+.public-hero-line-accent .public-hero-letter {
+  color: #c1dc8e;
+}
+
+@keyframes public-letter-glitter {
+  0%, 68%, 100% {
+    text-shadow: 0 0 0 transparent;
+    filter: brightness(1);
+  }
+  82% {
+    text-shadow: 0 0 9px rgba(255, 246, 190, 0.95), 0 0 18px rgba(255, 255, 255, 0.65);
+    filter: brightness(1.45);
+  }
+}
+
+@keyframes public-letter-reveal {
   from {
     opacity: 0;
-    transform: translateX(-24px) skewX(-7deg) scale(0.96);
+    transform: translateY(0.35em) skewX(-7deg);
     filter: blur(5px);
   }
   to {
     opacity: 1;
-    transform: translateX(0) skewX(0) scale(1);
+    transform: translateY(0) skewX(0);
     filter: blur(0);
   }
 }
@@ -898,12 +922,13 @@
   .public-hero-content {
     width: calc(100% - 40px);
     padding: 86px 0 20px;
-    transform: translate(-18px, -32px);
+    transform: translateY(-32px);
   }
 
   .public-hero h1 {
-    font-size: clamp(2.1rem, 7.5vw, 2.7rem);
-    line-height: 1.02;
+    max-width: 100%;
+    font-size: clamp(1.9rem, 7.5vw, 2.7rem);
+    line-height: 1.12;
   }
 
   .public-hero-actions {
@@ -1080,9 +1105,10 @@
     animation: none !important;
   }
 
-  .public-hero-word {
+  .public-hero-letter {
     opacity: 1;
     filter: none;
     transform: none;
+    animation: public-letter-glitter 2.4s var(--glitter-delay) ease-in-out infinite;
   }
 }

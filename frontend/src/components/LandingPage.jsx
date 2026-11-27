@@ -124,20 +124,42 @@ function Navigation() {
   );
 }
 
+function AnimatedHeroWord({ word, startIndex }) {
+  return (
+    <span className="public-hero-word" aria-hidden="true">
+      {Array.from(word).map((letter, index) => {
+        const delay = (startIndex + index) * 65;
+        return (
+          <span
+            className="public-hero-letter"
+            key={`${letter}-${index}`}
+            style={{
+              '--letter-delay': `${delay}ms`,
+              '--glitter-delay': `${delay + 500}ms`,
+            }}
+          >
+            {letter}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
 function Hero({ onGetStarted, checkingSession, sessionError }) {
   return (
     <main className="public-hero" id="home" aria-labelledby="public-hero-title">
       <div className="public-hero-shade" aria-hidden="true" />
       <div className="public-hero-content">
-        <h1 id="public-hero-title">
+        <h1 id="public-hero-title" aria-label="Growing Smarter, Farming Better.">
           <span className="public-hero-line">
-            <span className="public-hero-word" style={{ '--word-delay': '0ms' }}>Growing</span>{' '}
-            <span className="public-hero-word" style={{ '--word-delay': '180ms' }}>Smarter,</span>
+            <AnimatedHeroWord word="Growing" startIndex={0} />{' '}
+            <AnimatedHeroWord word="Smarter," startIndex={8} />
           </span>
           <br />
           <span className="public-hero-line public-hero-line-accent">
-            <span className="public-hero-word" style={{ '--word-delay': '360ms' }}>Farming</span>{' '}
-            <span className="public-hero-word" style={{ '--word-delay': '540ms' }}>Better.</span>
+            <AnimatedHeroWord word="Farming" startIndex={17} />{' '}
+            <AnimatedHeroWord word="Better." startIndex={24} />
           </span>
         </h1>
         <div className="public-hero-actions">

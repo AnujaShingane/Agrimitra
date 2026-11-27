@@ -3,19 +3,15 @@ import axios from 'axios';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ScanLine, UploadCloud, AlertCircle, CheckCircle, Leaf } from 'lucide-react';
 
-const PLANTS = [
-  'Paddy / Rice',
-  'Wheat',
-  'Cotton',
-  'Maize / Corn',
-  'Tomato',
-  'Chilli / Pepper',
-  'Groundnut / Peanut',
-  'Soybean',
-  'Potato',
-  'Brinjal / Eggplant',
-  'Grapevine',
-  'Other plant',
+const SYMPTOM_OPTIONS = [
+  'Black or brown spots',
+  'Yellow leaves',
+  'Holes or damaged leaves',
+  'White powder or patches',
+  'Leaves drying or falling',
+  'Curling or twisted leaves',
+  'Something else',
+  "I don't know",
 ];
 
 function Scanner({ t, language }) {
@@ -25,6 +21,11 @@ function Scanner({ t, language }) {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [error, setError] = useState('');
   const [plant, setPlant] = useState('');
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [symptoms, setSymptoms] = useState([]);
+  const [additionalSymptoms, setAdditionalSymptoms] = useState('');
+  const [noticedWhen, setNoticedWhen] = useState('');
+  const [spreading, setSpreading] = useState('');
   const [description, setDescription] = useState('');
   const fileInputRef = useRef(null);
 
@@ -47,7 +48,7 @@ function Scanner({ t, language }) {
       setError('The image must be 10MB or smaller.');
       return;
     }
-    if (!plant) {
+    if (!plant.trim()) {
       setError(t?.scannerPlantRequired || 'Select the plant or crop before uploading a leaf.');
       return;
     }
@@ -58,12 +59,14 @@ function Scanner({ t, language }) {
       const formData = new FormData();
       formData.append('file', file);
       formData.append('plant', plant);
+      symptoms.forEach((symptom) => formData.append('observations', symptom));
+      formData.append('additional_symptoms', additionalSymptoms.trim());
+      formData.append('noticed_when', noticedWhen);
+      formData.append('spreading', spreading);
       formData.append('description', description.trim());
-      
+
       const resp = await axios.post(`/api/scan?lang=${language || 'en'}`, formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
+        timeout: 60000,
       });
       setResult(resp.data.analysis);
     } catch (err) {
@@ -74,16 +77,30 @@ function Scanner({ t, language }) {
     }
   };
 
-  const handleFileChange = (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      setError('');
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl);
-      }
-      setPreviewUrl(URL.createObjectURL(file));
-      handleScan(file);
+  const selectFile = (file) => {
+    if (!file) return;
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+      setSelectedFile(null);
+      setPreviewUrl(null);
+      setError('Please select a JPEG, PNG, or WebP image.');
+      return;
     }
+    if (file.size > 10 * 1024 * 1024) {
+      setSelectedFile(null);
+      setPreviewUrl(null);
+      setError('The image must be 10MB or smaller.');
+      return;
+    }
+    setError('');
+    setResult(null);
+    setSelectedFile(file);
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(URL.createObjectURL(file));
+  };
+
+  const handleFileChange = (e) => {
+    selectFile(e.target.files?.[0]);
   };
 
   const handleDrop = (e) => {
@@ -91,15 +108,7 @@ function Scanner({ t, language }) {
     setDragging(false);
     if (scanning) return;
     
-    const file = e.dataTransfer.files[0];
-    if (file) {
-      setError('');
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl);
-      }
-      setPreviewUrl(URL.createObjectURL(file));
-      handleScan(file);
-    }
+    selectFile(e.dataTransfer.files?.[0]);
   };
 
   const handleClick = () => {
@@ -118,6 +127,11 @@ function Scanner({ t, language }) {
     setResult(null);
     setError('');
     setPlant('');
+    setSelectedFile(null);
+    setSymptoms([]);
+    setAdditionalSymptoms('');
+    setNoticedWhen('');
+    setSpreading('');
     setDescription('');
     if (previewUrl) {
       URL.revokeObjectURL(previewUrl);
@@ -128,11 +142,25 @@ function Scanner({ t, language }) {
     }
   };
 
+  const toggleSymptom = (symptom) => {
+    setSymptoms((current) => {
+      if (symptom === "I don't know") {
+        return current.includes(symptom) ? [] : [symptom];
+      }
+      const withoutUnknown = current.filter((item) => item !== "I don't know");
+      return withoutUnknown.includes(symptom)
+        ? withoutUnknown.filter((item) => item !== symptom)
+        : [...withoutUnknown, symptom];
+    });
+    setError('');
+  };
+
   const getSeverityColor = (severity) => {
     const s = (severity || '').toLowerCase();
-    if (s === 'high') return '#ef4444'; // Red
-    if (s === 'medium') return '#f59e0b'; // Amber
-    return '#10b981'; // Emerald
+    if (s === 'severe') return '#ef4444';
+    if (s === 'moderate') return '#f59e0b';
+    if (s === 'mild') return '#10b981';
+    return '#6b7280';
   };
 
   return (
@@ -151,20 +179,86 @@ function Scanner({ t, language }) {
         <div className="scanner-upload-section">
           <div className="glass-panel" style={{ padding: '24px', marginBottom: '20px' }} onClick={(event) => event.stopPropagation()}>
             <label htmlFor="scanner-plant" style={{ display: 'block', marginBottom: '8px', fontWeight: 600 }}>
-              {t?.scannerPlantLabel || 'What plant is this leaf from?'}
+              Plant name <span aria-hidden="true">*</span>
             </label>
-            <select
+            <input
               id="scanner-plant"
+              type="text"
               value={plant}
               onChange={(event) => { setPlant(event.target.value); setError(''); }}
+              maxLength={100}
+              required
+              placeholder="For example, Mango, Tomato, or Wheat"
+              style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--border-color)', background: 'var(--surface-primary)', color: 'var(--text-primary)' }}
+            />
+
+            <fieldset style={{ border: 0, padding: 0, margin: '20px 0 0' }}>
+              <legend style={{ marginBottom: '10px', fontWeight: 600 }}>
+                What have you noticed? (optional)
+              </legend>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: '8px' }}>
+                {SYMPTOM_OPTIONS.map((symptom) => (
+                  <label key={symptom} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <input
+                      type="checkbox"
+                      checked={symptoms.includes(symptom)}
+                      onChange={() => toggleSymptom(symptom)}
+                    />
+                    {symptom}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+
+            {symptoms.includes('Something else') && (
+              <>
+                <label htmlFor="scanner-additional-symptoms" style={{ display: 'block', margin: '16px 0 8px', fontWeight: 600 }}>
+                  Tell us what else you noticed (optional)
+                </label>
+                <input
+                  id="scanner-additional-symptoms"
+                  type="text"
+                  value={additionalSymptoms}
+                  onChange={(event) => setAdditionalSymptoms(event.target.value)}
+                  maxLength={300}
+                  placeholder="Describe what you see"
+                  style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--border-color)', background: 'var(--surface-primary)', color: 'var(--text-primary)' }}
+                />
+              </>
+            )}
+
+            <label htmlFor="scanner-noticed-when" style={{ display: 'block', margin: '18px 0 8px', fontWeight: 600 }}>
+              When did you first notice it? (optional)
+            </label>
+            <select
+              id="scanner-noticed-when"
+              value={noticedWhen}
+              onChange={(event) => setNoticedWhen(event.target.value)}
               style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--border-color)', background: 'var(--surface-primary)', color: 'var(--text-primary)' }}
             >
-              <option value="">{t?.scannerPlantPlaceholder || 'Select a plant or crop...'}</option>
-              {PLANTS.map((option) => <option key={option} value={option}>{option}</option>)}
+              <option value="">Choose an option...</option>
+              {['Today', 'A few days ago', 'About a week ago', 'More than two weeks ago', 'Not sure'].map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
+            </select>
+
+            <label htmlFor="scanner-spreading" style={{ display: 'block', margin: '18px 0 8px', fontWeight: 600 }}>
+              Is the problem spreading? (optional)
+            </label>
+            <select
+              id="scanner-spreading"
+              value={spreading}
+              onChange={(event) => setSpreading(event.target.value)}
+              style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--border-color)', background: 'var(--surface-primary)', color: 'var(--text-primary)' }}
+            >
+              <option value="">Choose an option...</option>
+              {['Yes', 'No', 'Not sure'].map((option) => (
+                <option key={option} value={option}>{option}</option>
+              ))}
             </select>
 
             <label htmlFor="scanner-description" style={{ display: 'block', margin: '18px 0 8px', fontWeight: 600 }}>
-              {t?.scannerDescriptionLabel || 'Describe what you observe (optional)'}
+              Anything else you would like to tell us? (optional)
             </label>
             <textarea
               id="scanner-description"
@@ -172,7 +266,7 @@ function Scanner({ t, language }) {
               onChange={(event) => setDescription(event.target.value)}
               maxLength={1200}
               rows={4}
-              placeholder={t?.scannerDescriptionPlaceholder || 'For example: yellow spots started three days ago after heavy rain...'}
+              placeholder="For example, the weather or recent changes in watering"
               style={{ width: '100%', padding: '12px', borderRadius: '8px', border: '1px solid var(--border-color)', resize: 'vertical', color: 'var(--text-primary)' }}
             />
           </div>
@@ -181,7 +275,7 @@ function Scanner({ t, language }) {
             type="file"
             ref={fileInputRef}
             onChange={handleFileChange}
-            accept="image/*"
+            accept="image/jpeg,image/png,image/webp"
             style={{ display: 'none' }}
           />
 
@@ -245,6 +339,17 @@ function Scanner({ t, language }) {
             </AnimatePresence>
           </motion.div>
 
+          {selectedFile && !scanning && (
+            <button
+              type="button"
+              className="button button-primary mt-4"
+              onClick={() => handleScan(selectedFile)}
+              disabled={!plant.trim()}
+            >
+              Analyze leaf
+            </button>
+          )}
+
           {previewUrl && !scanning && (
             <motion.button 
               className="btn-danger mt-4" 
@@ -282,125 +387,80 @@ function Scanner({ t, language }) {
                 style={{ borderTop: `4px solid ${getSeverityColor(result.severity)}` }}
               >
                 <div className="results-header">
-                  <h2>{result.disease}</h2>
-                  <span 
+                  <div>
+                    <h2>{result.possible_disease}</h2>
+                    <span className="severity-badge">
+                      {result.diagnosis_status === 'possible'
+                        ? <CheckCircle size={16} />
+                        : <AlertCircle size={16} />}
+                      {result.diagnosis_status.replaceAll('_', ' ')}
+                    </span>
+                  </div>
+                  <span
                     className="severity-badge"
                     style={{ backgroundColor: `${getSeverityColor(result.severity)}20`, color: getSeverityColor(result.severity) }}
                   >
-                    {result.severity === 'High' ? <AlertCircle size={16} /> : <CheckCircle size={16} />}
-                    {result.severity} {t?.scannerSeverity || 'Severity'}
+                    {result.severity} severity
                   </span>
                 </div>
 
                 <p style={{ color: 'var(--text-muted)', margin: '0 0 18px' }}>
-                  {t?.scannerAnalyzedPlant || 'Analysis context'}: {plant}
+                  Plant: {result.plant_name || plant}
                 </p>
 
-                {result.pathogen && (
+                {result.plant_identification_note && (
                   <div className="results-detail-block">
-                    <strong>Pathogen</strong>
-                    <p>{result.pathogen}</p>
+                    <strong>Plant identification</strong>
+                    <p>{result.plant_identification_note}</p>
                   </div>
                 )}
 
-                {result.diagnostic_note && (
-                  <div className="results-detail-block">
-                    <strong>Why this fits</strong>
-                    <p>{result.diagnostic_note}</p>
-                  </div>
-                )}
-                
-                <div className="results-metrics">
-                  <div className="metric-box">
-                    <span className="metric-label">{t?.scannerConfidence || 'Confidence'}</span>
-                    <span className="metric-value">{result.confidence}%</span>
-                  </div>
-                  <div className="metric-box">
-                    <span className="metric-label">{t?.scannerAffectedArea || 'Affected Area'}</span>
-                    <span className="metric-value">{result.affected_area || 'Unknown'}</span>
-                  </div>
-                </div>
-
-                {result.visible_signs?.length > 0 && (
+                {result.observed_symptoms?.length > 0 && (
                   <div className="results-recommendations" style={{ marginTop: '18px' }}>
-                    <h3><Leaf size={18} /> Visible signs</h3>
+                    <h3><Leaf size={18} /> What we can see</h3>
                     <ul>
-                      {result.visible_signs.map((item, index) => (
+                      {result.observed_symptoms.map((item, index) => (
                         <li key={`sign-${index}`}>{item}</li>
                       ))}
                     </ul>
                   </div>
                 )}
 
-                <div className="results-recommendations">
-                  <h3><Leaf size={18} /> {t?.scannerRecommendedActions || 'Recommended Actions'}</h3>
-                  <ul>
-                    {(result.recommendations || []).map((rec, i) => (
-                      <motion.li 
-                        key={i}
-                        initial={{ opacity: 0, x: 10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        transition={{ delay: i * 0.1 }}
-                      >
-                        {rec}
-                      </motion.li>
-                    ))}
-                  </ul>
-                </div>
+                {result.explanation && (
+                  <div className="results-detail-block">
+                    <strong>What may be happening</strong>
+                    <p>{result.explanation}</p>
+                  </div>
+                )}
 
-                <div className="results-recommendations" style={{ marginTop: '18px' }}>
-                  <h3><Leaf size={18} /> Treatment / Fungicide Advisory</h3>
-                  {result.treatment_options?.length > 0 && (
-                    <ul>
-                      {result.treatment_options.map((item, index) => (
-                        <li key={`treatment-option-${index}`}>{item}</li>
-                      ))}
-                    </ul>
-                  )}
-                  {result.treatment_advisory && (
-                    <p className="results-caution">{result.treatment_advisory}</p>
-                  )}
-                </div>
-
-                {result.non_chemical_actions?.length > 0 && (
+                {result.alternative_causes?.length > 0 && (
                   <div className="results-recommendations" style={{ marginTop: '18px' }}>
-                    <h3><Leaf size={18} /> Non-chemical actions</h3>
+                    <h3><Leaf size={18} /> Other possible causes</h3>
                     <ul>
-                      {result.non_chemical_actions.map((item, index) => (
-                        <li key={`non-chemical-${index}`}>{item}</li>
+                      {result.alternative_causes.map((item, index) => (
+                        <li key={`cause-${index}`}>{item}</li>
                       ))}
                     </ul>
                   </div>
                 )}
 
-                {result.symptoms && (
+                {result.treatment?.length > 0 && (
                   <div className="results-recommendations" style={{ marginTop: '18px' }}>
-                    <h3><Leaf size={18} /> Symptoms</h3>
+                    <h3><Leaf size={18} /> What you can do</h3>
                     <ul>
-                      {(result.symptoms || []).map((item, index) => (
-                        <li key={`symptom-${index}`}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                {result.treatment && (
-                  <div className="results-recommendations" style={{ marginTop: '18px' }}>
-                    <h3><Leaf size={18} /> Treatment</h3>
-                    <ul>
-                      {(result.treatment || []).map((item, index) => (
+                      {result.treatment.map((item, index) => (
                         <li key={`treatment-${index}`}>{item}</li>
                       ))}
                     </ul>
                   </div>
                 )}
 
-                {result.preventive_measures && (
+                {result.prevention?.length > 0 && (
                   <div className="results-recommendations" style={{ marginTop: '18px' }}>
                     <h3><Leaf size={18} /> Prevention</h3>
                     <ul>
-                      {(result.preventive_measures || []).map((item, index) => (
-                        <li key={`preventive-${index}`}>{item}</li>
+                      {result.prevention.map((item, index) => (
+                        <li key={`prevention-${index}`}>{item}</li>
                       ))}
                     </ul>
                   </div>
@@ -408,19 +468,15 @@ function Scanner({ t, language }) {
 
                 {result.confidence_note && (
                   <div className="results-detail-block results-caution" style={{ marginTop: '18px' }}>
-                    <strong>Image confidence note</strong>
+                    <strong>About this result</strong>
                     <p>{result.confidence_note}</p>
                   </div>
                 )}
 
-                {result.source_guidance?.length > 0 && (
-                  <div className="results-recommendations" style={{ marginTop: '18px' }}>
-                    <h3><Leaf size={18} /> Source guidance</h3>
-                    <ul>
-                      {result.source_guidance.map((item, index) => (
-                        <li key={`source-${index}`}>{item}</li>
-                      ))}
-                    </ul>
+                {result.when_to_consult_an_expert && (
+                  <div className="results-detail-block" style={{ marginTop: '18px' }}>
+                    <strong>When to ask an expert</strong>
+                    <p>{result.when_to_consult_an_expert}</p>
                   </div>
                 )}
               </motion.div>

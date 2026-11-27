@@ -13,6 +13,10 @@ import time
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
+from google.auth import exceptions as google_auth_exceptions
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2 import id_token
+
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 
 SESSION_COOKIE = "agrimitra_session"
@@ -43,6 +47,10 @@ class Credentials(BaseModel):
         if not EMAIL_PATTERN.fullmatch(normalized):
             raise ValueError("Enter a valid email address.")
         return normalized
+
+
+class GoogleCredential(BaseModel):
+    credential: str = Field(min_length=1, max_length=8192)
 
 
 def _database_path() -> Path:
@@ -173,6 +181,25 @@ def _user_response(user: dict) -> dict:
     }
 
 
+def _verify_google_id_token(credential: str) -> dict:
+    client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+    if not client_id:
+        raise HTTPException(status_code=503, detail="Google sign-in is not configured.")
+    try:
+        return id_token.verify_oauth2_token(
+            credential,
+            GoogleRequest(),
+            audience=client_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=401, detail="Invalid Google sign-in credential.") from error
+    except google_auth_exceptions.GoogleAuthError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Google sign-in verification is temporarily unavailable.",
+        ) from error
+
+
 @router.post("/signup", status_code=201)
 def signup(credentials: Credentials, response: Response) -> dict:
     _initialize_store()
@@ -198,6 +225,60 @@ def signup(credentials: Credentials, response: Response) -> dict:
         "full_name": credentials.full_name or "",
     }
     _set_session_cookie(response, user_id)
+    return {"user": _user_response(user)}
+
+
+@router.post("/google")
+def google_login(google_credential: GoogleCredential, response: Response) -> dict:
+    claims = _verify_google_id_token(google_credential.credential)
+    email = claims.get("email")
+    if (
+        not claims.get("sub")
+        or claims.get("email_verified") is not True
+        or not isinstance(email, str)
+        or not EMAIL_PATTERN.fullmatch(email.strip())
+    ):
+        raise HTTPException(status_code=401, detail="Google account email is not verified.")
+
+    email = email.strip().lower()
+    full_name = claims.get("name")
+    if not isinstance(full_name, str):
+        full_name = ""
+    full_name = full_name.strip()[:100]
+
+    _initialize_store()
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT id, email, full_name FROM auth_users WHERE email = ?",
+            (email,),
+        ).fetchone()
+        if row is None:
+            try:
+                cursor = connection.execute(
+                    """INSERT INTO auth_users (email, full_name, password_hash, created_at)
+                    VALUES (?, ?, ?, ?)""",
+                    (
+                        email,
+                        full_name,
+                        _hash_password(secrets.token_urlsafe(48)),
+                        int(time.time()),
+                    ),
+                )
+                user = {"id": cursor.lastrowid, "email": email, "full_name": full_name}
+            except sqlite3.IntegrityError:
+                # Another request may have created the same verified email concurrently.
+                row = connection.execute(
+                    "SELECT id, email, full_name FROM auth_users WHERE email = ?",
+                    (email,),
+                ).fetchone()
+                if row is None:
+                    raise
+                user = {"id": row["id"], "email": row["email"], "full_name": row["full_name"]}
+        else:
+            # Google's verified email proves control of an existing email/password account.
+            user = {"id": row["id"], "email": row["email"], "full_name": row["full_name"]}
+
+    _set_session_cookie(response, user["id"])
     return {"user": _user_response(user)}
 
 

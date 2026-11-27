@@ -1657,10 +1657,49 @@ body {
   font-size: 0.88rem;
 }
 
+.google-signin {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.google-signin-button {
+  min-height: 40px;
+}
+
+.google-signin-button.is-disabled {
+  pointer-events: none;
+  opacity: 0.65;
+}
+
+.google-signin-status {
+  color: #718074;
+  font-size: 0.76rem;
+  text-align: center;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 21px;
+  color: #879287;
+  font-size: 0.72rem;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  flex: 1;
+  height: 1px;
+  background: #e5ece2;
+  content: '';
+}
+
 .auth-form {
   display: flex;
   flex-direction: column;
-  margin-top: 25px;
+  margin-top: 15px;
 }
 
 .auth-form label {

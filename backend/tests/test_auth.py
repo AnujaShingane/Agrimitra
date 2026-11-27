@@ -3,6 +3,7 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
+import auth
 from auth import _hash_password
 from main import app
 
@@ -117,3 +118,85 @@ def test_existing_auth_database_keeps_accounts_after_name_migration(tmp_path, mo
         assert login.status_code == 200
         assert login.json()["user"]["full_name"] == ""
         assert client.get("/api/auth/me").json()["user"]["email"] == "existing@example.com"
+
+
+def test_google_signin_creates_verified_user_and_sets_session(client, monkeypatch):
+    monkeypatch.setattr(
+        auth,
+        "_verify_google_id_token",
+        lambda credential: {
+            "sub": "google-user-123",
+            "email": "Asha@example.com",
+            "email_verified": True,
+            "name": "Asha Farmer",
+        },
+    )
+
+    response = client.post("/api/auth/google", json={"credential": "google-id-token"})
+
+    assert response.status_code == 200
+    assert response.json()["user"]["email"] == "asha@example.com"
+    assert response.json()["user"]["full_name"] == "Asha Farmer"
+    assert response.cookies.get("agrimitra_session")
+    assert client.get("/api/auth/me").json()["user"]["email"] == "asha@example.com"
+
+
+def test_google_signin_uses_existing_verified_email_account(client, monkeypatch):
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "full_name": "Existing Farmer",
+            "email": "farmer@example.com",
+            "password": "secure-password",
+        },
+    )
+    assert signup.status_code == 201
+    with auth._connect() as connection:
+        original = connection.execute(
+            "SELECT id, password_hash FROM auth_users WHERE email = ?",
+            ("farmer@example.com",),
+        ).fetchone()
+
+    monkeypatch.setattr(
+        auth,
+        "_verify_google_id_token",
+        lambda credential: {
+            "sub": "google-user-456",
+            "email": "FARMER@example.com",
+            "email_verified": True,
+            "name": "Google Profile Name",
+        },
+    )
+
+    response = client.post("/api/auth/google", json={"credential": "google-id-token"})
+
+    assert response.status_code == 200
+    assert response.json()["user"]["id"] == original["id"]
+    assert response.json()["user"]["full_name"] == "Existing Farmer"
+    with auth._connect() as connection:
+        current = connection.execute(
+            "SELECT id, password_hash FROM auth_users WHERE email = ?",
+            ("farmer@example.com",),
+        ).fetchone()
+    assert current["id"] == original["id"]
+    assert current["password_hash"] == original["password_hash"]
+    assert client.post(
+        "/api/auth/login",
+        json={"email": "farmer@example.com", "password": "secure-password"},
+    ).status_code == 200
+
+
+def test_google_signin_rejects_unverified_email(client, monkeypatch):
+    monkeypatch.setattr(
+        auth,
+        "_verify_google_id_token",
+        lambda credential: {
+            "sub": "google-user-789",
+            "email": "farmer@example.com",
+            "email_verified": False,
+        },
+    )
+
+    response = client.post("/api/auth/google", json={"credential": "google-id-token"})
+
+    assert response.status_code == 401

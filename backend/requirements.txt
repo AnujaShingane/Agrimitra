@@ -10,6 +10,8 @@ langgraph-checkpoint-sqlite
 faiss-cpu==1.13.2
 sentence-transformers==5.5.1
 python-dotenv==1.2.2
+google-auth
+google-genai
 pdfminer.six==20221105
 pydantic==2.13.4
 slowapi==0.1.10
